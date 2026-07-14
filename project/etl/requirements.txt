@@ -1,0 +1,5 @@
+requests
+s3fs
+dotenv
+pyspark
+delta-spark==4.0.0

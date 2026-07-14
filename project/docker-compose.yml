@@ -1,0 +1,126 @@
+services:
+  source_db:
+    build: ./source_db
+    container_name: source_sql_container
+    networks:
+      - source_network
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+
+  source_api:
+    build: ./API
+    container_name: source_api_container
+    ports:
+      - "5000:5000"
+    networks:
+      - source_network
+      - transformations
+    volumes:
+      - "./env:/app/env"
+    healthcheck:
+      test: ["CMD", "curl -f http://localhost:5000/get_user_data || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      source_db:
+          condition: service_healthy
+      data_generator:
+        condition: service_completed_successfully
+    restart: always
+
+
+  data_generator:
+    build: ./data_generator
+    container_name: data_generator_container
+    networks:
+      - source_network
+    volumes:
+      - "./env:/app/env"
+    depends_on:
+      source_db:
+        condition: service_healthy
+  
+  
+  minio:
+    image: quay.io/minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - transformations
+    env_file:
+      - ./env/.env
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_storage:/data
+
+
+  spark_s3:
+    build: ./etl
+    container_name: spark_minio
+    networks:
+      - transformations
+    ports:
+      - "4040:4040"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark_minio
+      - JAVE_HOME=/opt/java/openjdk
+    volumes:
+      - "./env:/opt/spark/env"
+      - "./etl:/opt/spark/etl"
+
+  airflow:
+    build: ./airflow
+    container_name: airflow
+    networks:
+      - source_network
+      - transformations
+    ports:
+      - "8081:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/spark_jobs:/opt/airflow/spark_jobs
+      - ./etl:/opt/airflow/etl
+      - ./env:/opt/airflow/env
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: []
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+      airflow scheduler &
+      airflow webserver -p 8080
+      "
+    depends_on:
+      - minio
+    restart: always
+
+
+networks:
+  source_network:
+    driver: bridge
+  transformations:
+    driver: bridge
+  
+
+volumes:
+  minio_storage:

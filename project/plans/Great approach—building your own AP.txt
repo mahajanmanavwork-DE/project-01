@@ -1,0 +1,184 @@
+Great approach—building your own API first shows real engineering maturity. Here's the blunt, detailed breakdown:
+
+---
+
+Your Source System (API + CSVs)
+
+Build a FastAPI that simulates an e-commerce backend with these tables:
+
+1. Orders (transactional fact table)
+   - order_id, customer_id, product_id, quantity, total_amount, order_status, created_at, updated_at
+   - Statuses: 'pending', 'confirmed', 'shipped', 'delivered', 'cancelled', 'returned'
+
+2. Customers (dimension table)
+   - customer_id, name, email, phone, city, state, tier, created_at, updated_at
+   - Tier: 'bronze', 'silver', 'gold', 'platinum' — these change over time, perfect for SCD2
+
+3. Products (dimension table)
+   - product_id, product_name, category, sub_category, base_price, discount_pct, supplier, created_at, updated_at
+   - Price and discount changes = SCD2 goldmine
+
+4. Order_Items (bridge/line-item table) — add this, it's critical
+   - order_item_id, order_id, product_id, unit_price, quantity, line_total
+   - One order can have multiple products, this is real-world complexity interviewers love
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Your API endpoints should include:
+- GET /orders?from_date=&to_date= (incremental extraction trigger)
+- GET /customers?updated_since=
+- GET /products?updated_since=
+- POST /orders (to simulate new data generation)
+- PUT /customers/{id} (profile updates triggering SCD2)
+- PUT /products/{id} (price changes triggering SCD2)
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Your PySpark Pipeline (The Real Meat)
+
+Step 1: Incremental Extraction
+- Airflow DAG triggers daily at 2 AM
+- PySpark reads from your API using requests library inside UDF or map partitions
+- Also ingest fallback CSV/JSON files dumped by API to /data/raw/YYYY-MM-DD/
+- Track watermark: store last_extraction_ts in a Delta table pipeline_metadata.watermark_log
+
+Step 2: Bronze Layer (Raw Landing)
+- Dump raw API responses as-is into bronze/orders, bronze/customers, bronze/products, bronze/order_items
+- Add _ingestion_ts, _source_file, _batch_id metadata columns
+- No transformations, pure append — data lake principle
+
+Step 3: Silver Layer (Cleaned + SCD2 Applied)
+
+Here's where you shine:
+
+- For Orders: Deduplicate on order_id, handle late-arriving updates (order status changes), add is_current flag
+- For Customers (SCD Type 2):
+  - Compare incoming vs existing on composite key (customer_id)
+  - If city, state, phone, or tier changed → expire old record (valid_to = current_date, is_current = False), insert new row (valid_from = current_date, valid_to = NULL, is_current = True)
+  - Track scd_hash = MD5 of all tracked columns for efficient change detection
+- For Products (SCD Type 2):
+  - Same logic on base_price, discount_pct, supplier
+  - Price history matters for revenue reconciliation later
+- For Order_Items: Join with Silver Orders to validate referential integrity, flag orphan line-items
+
+Step 4: Gold Layer (Business Aggregates)
+
+Build these star-schema fact/dimension tables:
+
+- gold.dim_customer (current snapshot — is_current = True only)
+- gold.dim_product (current snapshot)
+- gold.dim_date (pre-built date dimension — I'll explain why next)
+- gold.fact_daily_sales — aggregated at day grain: total_revenue, total_orders, avg_order_value, top_products, revenue by category
+- gold.fact_customer_360 — customer-level aggregates: lifetime_value, total_orders, avg_order_value, preferred_category, churn_risk_flag
+
+Step 5: Additional Features I Demand You Build
+
+Because this separates "meh" from "outstanding":
+
+1. Data Quality Framework (Great Expectations)
+   - Between Bronze→Silver: null checks on PKs, duplicate detection, schema validation
+   - Between Silver→Gold: referential integrity, aggregate sanity checks (can revenue be negative?)
+   - Failed checks → Airflow sends Slack/email alert + pipeline halts
+
+2. Slowly Changing Dimension Reconciliation Report
+   - After each run, generate a log of how many SCD2 changes occurred (by table)
+   - Store in pipeline_metadata.scd_audit_log for traceability
+
+3. Late-Arriving Data Handling
+   - What if an order from 3 days ago arrives now? Your pipeline should identify, backfill, and recompute affected Gold aggregates (partition overwrite on affected dates)
+
+4. Data Lineage & Catalog
+   - Use Delta Lake's built-in DESCRIBE HISTORY — write a script that generates a lineage report showing table dependencies
+   - Even simpler: maintain a pipeline_metadata.table_catalog with schema, owner, refresh_frequency, SCD_type
+
+5. Incremental vs Full Refresh Intelligence
+   - Dimension tables: full snapshot daily (safe)
+   - Fact tables: incremental append by created_at
+   - Your DAG should accept a --full-refresh flag for disaster recovery
+
+6. FastAPI Serving Layer on Gold
+   - GET /sales/daily?date=
+   - GET /customers/{id}/360 — returns LTV, tier, order history
+   - GET /products/{id}/price-history — full SCD2 timeline visible
+
+---
+
+The Architecture Diagram You'll Reference in Interviews
+
+
+Source API (FastAPI) + CSV/JSON dump
+        ↓
+Airflow DAG (daily @ 2AM)
+        ↓
+PySpark Extraction Job
+        ↓
+Bronze Delta Tables (raw, append-only)
+        ↓
+Data Quality Checks (Great Expectations)
+        ↓
+Silver Delta Tables (cleaned, deduped, SCD2 applied)
+        ↓
+Data Quality Checks
+        ↓
+Gold Delta Tables (star schema, business aggregates)
+        ↓
+FastAPI Serving Layer
+        ↓
+Grafana/Superset Dashboard (optional but shiny)
+
+
+---
+
+Why This Destroys 99% of Fresher Projects
+
+- Most freshers do: "CSV → Clean → Store in MySQL." Boring.
+- You're doing: API extraction, medallion architecture, SCD Type 2, data quality gates, late-arriving data, reconciliation, and serving layer.
+- Interviewers will drill into your SCD2 logic, incremental design, and error handling. You'll have answers because you built it.
+
+---
+
+Ready to start? Tell me which part you want me to detail first — the FastAPI schema design, the PySpark SCD2 implementation, or the Airflow DAG structure. I'll give you production-grade code, not tutorials.
+
+
+
+
+
+
+
+Short answer: Generate it yourself with Python, don't use random entirely.
+
+Build a seeded semi-random generator script that creates realistic-looking data:
+
+- Use Faker library + hand-crafted lists for Indian names, cities, product names
+- Create deliberate patterns: 70% orders from top 20% customers, seasonal spikes, specific customers changing cities/tiers, products undergoing price hikes
+- Generate 3-4 months of historical data (so SCD2 has meat to show) + script to generate daily delta files
+- Store as CSV/JSON in dated folders: /data/YYYY-MM-DD/
+
+This proves you can simulate production scenarios, not just process static datasets. Interviewers love when you say "I built the source system too."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes, absolutely. Non-negotiable for a 10/10 project.
+
+Minimum containers:
+- FastAPI source app (your API)
+- PostgreSQL (source DB behind API)
+- MySQL (destination DW)
+- Apache Spark (PySpark master + 1 worker)
+- MinIO (S3-compatible local storage for Delta Lake files)
+- Airflow (webserver + scheduler + postgres backend)
+- Optional but shiny: Jupyter for analysis, Grafana for dashboard
+
+One docker-compose.yml file. Interviewer clones your repo, runs docker-compose up, and everything works. That's the "holy shit" moment for a fresher project. Proves you understand production infrastructure, not just scripting.

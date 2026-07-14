@@ -1,0 +1,27 @@
+{
+    "schema": {
+        "bronze": {
+            "user_data": 1,
+            "products": 0,
+            "orders": 1,
+            "inventory": 0,
+            "order_items": 1,
+            "order_status": 1
+        },
+        "silver": {
+            "user_data": 1,
+            "products": 0,
+            "orders": 1,
+            "inventory": 0,
+            "order_items": 1,
+            "order_status": 1
+        },
+        "gold": {
+            "customer_360": 1,
+            "daily_sales_summary": 1,
+            "daily_product_sales": 1,
+            "product_performance": 1,
+            "category_trends": 1
+        }
+    }
+}
